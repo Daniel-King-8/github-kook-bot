@@ -1,0 +1,27 @@
+services:
+  github-kook-bot:
+    build: .
+    image: github-kook-bot:latest
+    container_name: github-kook-bot
+    restart: unless-stopped
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ./data:/data
+    environment:
+      TZ: Asia/Shanghai
+      # 也可以用环境变量覆盖 config.toml 中的配置：
+      # KOOK_TOKEN: "your-bot-token"
+      # KOOK_CHANNEL_ID: "1234567890"
+      # GITHUB_TOKEN: "github_pat_xxx"
+      # POLL_INTERVAL: "300"
+      # DRY_RUN: "1"
+      # 频道命令（也可直接写在 config.toml）
+      # COMMAND_ENABLED: "1"
+      # ALLOWED_ROLES: "1234567890,987654321"
+      # ALLOWED_USERS: "111111"
+      # COMMAND_CHANNELS: "1234567890"
+      # 如果宿主机通过代理访问 GitHub，可在这里传入：
+      # HTTPS_PROXY: "http://host.docker.internal:7890"
+      # HTTP_PROXY: "http://host.docker.internal:7890"
+      # CA_BUNDLE: "/certs/proxy-ca.pem"
+      # INSECURE_SKIP_VERIFY: "0"

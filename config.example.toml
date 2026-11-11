@@ -1,0 +1,80 @@
+# ============================================================
+# GitHub -> KOOK 推送机器人配置
+# 复制本文件为 config.toml 后填写自己的信息
+# ============================================================
+
+[kook]
+# KOOK 开发者后台 -> 应用 -> 机器人 -> Token
+# https://developer.kookapp.cn/app/index
+token = "请填写 KOOK Bot Token"
+
+# 目标文字频道 ID
+# KOOK 客户端：设置 -> 其他 -> 开启“开发者模式”，然后右键频道 -> 复制 ID
+channel_id = "请填写频道 ID"
+
+# 可选：自定义 API 地址（一般不需要改）
+# api_base = "https://www.kookapp.cn/api/v3"
+
+
+[bot]
+# 轮询间隔（秒）。建议 300 秒以上；配置了 GITHUB_TOKEN 可以更频繁
+interval = 300
+
+# 每次推送最多展示多少条提交（1-20）
+max_commits = 5
+
+# 是否推送预发布版本（prerelease）
+include_prerelease = true
+
+# 首次运行是否推送当前最新状态
+# false = 只建立基线，避免刚启动就刷屏（推荐）
+notify_on_first_run = false
+
+# 日志级别：DEBUG / INFO / WARNING / ERROR
+log_level = "INFO"
+
+# 可选：GitHub Personal Access Token（强烈建议配置，否则限额只有 60 次/小时）
+# github_token = "github_pat_xxx"
+
+# 可选：代理/自签名证书环境
+# ca_bundle = "/path/to/proxy-ca.pem"
+# insecure_skip_verify = false
+
+
+# ============================================================
+# 频道命令：@机器人 添加订阅
+# 重要：KOOK 机器人的连接方式必须选择 WebSocket（不能是 Webhook），
+#       否则机器人收不到频道里的 @ 消息。
+# ============================================================
+[command]
+enabled = true
+
+# 允许执行命令的 KOOK 身份组 ID（纯数字，可写多个）
+# 留空 = 所有人都不能用。不知道角色 ID 时，先让有身份组的用户 @机器人，
+# 然后执行 docker compose logs，在“拒绝无权限命令”日志里可以看到 roles=[...]
+allowed_roles = []
+
+# 可选：额外允许的用户 ID
+allowed_users = []
+
+# 通过频道命令添加的仓库，默认监控哪些事件
+default_events = ["release", "push"]
+
+# 允许执行命令的频道 ID，留空则只允许上面的 kook.channel_id
+channel_ids = []
+
+
+# ============================================================
+# 要监控的仓库，可以写多个 [[repos]]
+# events 支持: "release"（发布版本）、"push"（分支提交）
+# branch 不填则自动使用仓库的默认分支
+# ============================================================
+
+[[repos]]
+name = "microsoft/vscode"
+events = ["release", "push"]
+# branch = "main"
+
+[[repos]]
+name = "koishijs/koishi"
+events = ["release"]

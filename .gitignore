@@ -1,0 +1,13 @@
+# 含 Token 的配置，不要提交
+config.toml
+
+# 运行状态
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 环境变量
+.env

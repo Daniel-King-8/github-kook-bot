@@ -1,0 +1,10 @@
+.git
+.gitignore
+config.toml
+config.example.toml
+data
+README.md
+*.md
+__pycache__
+*.pyc
+.env
