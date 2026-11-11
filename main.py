@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import ssl
 import sys
@@ -29,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 GITHUB_API = "https://api.github.com"
 KOOK_API_DEFAULT = "https://www.kookapp.cn/api/v3"
@@ -49,6 +50,42 @@ RESERVED_OWNERS = {
 }
 REMOVE_KEYWORDS = ("删除", "取消", "退订", "移除", "remove", "unsubscribe", "unsub", "del")
 LIST_KEYWORDS = ("列表", "清单", "list", "订阅列表")
+
+# 1.2.0：所有消息改为 KOOK 卡片消息（type=10）。
+# 卡片边框支持任意 16 进制色；KOOK 按钮只支持预设主题色，
+# 所以每个颜色都配一个最接近的按钮主题。
+COLOR_PALETTE: tuple[tuple[str, str], ...] = (
+    # danger 红
+    ("#E74C3C", "danger"),
+    ("#FF6B6B", "danger"),
+    ("#FF4D4F", "danger"),
+    ("#E64980", "danger"),
+    # warning 橙黄
+    ("#F39C12", "warning"),
+    ("#FFA94D", "warning"),
+    ("#FF922B", "warning"),
+    ("#FFD43B", "warning"),
+    # success 绿色（薄荷绿按钮）
+    ("#2ECC71", "success"),
+    ("#51CF66", "success"),
+    ("#38D9A9", "success"),
+    ("#1ABC9C", "success"),
+    # primary 草绿（KOOK 的 primary 按钮是草绿色）
+    ("#7ACC35", "primary"),
+    ("#6CBF00", "primary"),
+    ("#A9E34B", "primary"),
+    ("#82C91E", "primary"),
+    # info 蓝色（KOOK 的 info 按钮是天蓝色）
+    ("#3498DB", "info"),
+    ("#4DABF7", "info"),
+    ("#5C7CFA", "info"),
+    ("#9775FA", "info"),
+    # secondary 灰色
+    ("#95A5A6", "secondary"),
+    ("#ADB5BD", "secondary"),
+    ("#CED4DA", "secondary"),
+    ("#607D8B", "secondary"),
+)
 
 LOG = logging.getLogger("github-kook-bot")
 STOP_EVENT = threading.Event()
@@ -402,6 +439,8 @@ class KookClient:
         self.token = token
         self.api_base = api_base.rstrip("/")
         self.dry_run = dry_run
+        self._color_lock = threading.Lock()
+        self._last_color: str | None = None
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bot {self.token}"}
@@ -425,19 +464,86 @@ class KookClient:
             raise RuntimeError(f"KOOK 网关返回缺少 url: {result}")
         return str(url)
 
-    def send(self, channel_id: str, content: str, quote: str | None = None) -> None:
-        content = content.strip()
+    def _pick_color(self) -> tuple[str, str]:
+        """随机选一个颜色，避免与上一条消息完全相同。"""
+        with self._color_lock:
+            choices = [item for item in COLOR_PALETTE if item[0] != self._last_color]
+            if not choices:
+                choices = list(COLOR_PALETTE)
+            color_hex, theme = secrets.choice(choices)
+            self._last_color = color_hex
+            return color_hex, theme
+
+    def send_card(
+        self,
+        channel_id: str,
+        title: str,
+        lines: list[str],
+        buttons: list[dict[str, str]] | None = None,
+        quote: str | None = None,
+    ) -> None:
+        color_hex, theme = self._pick_color()
+        title = clean_text(title, 90)
+        content = "\n".join(lines).strip() or "—"
         if len(content) > MAX_KOOK_CONTENT:
             content = content[:MAX_KOOK_CONTENT].rstrip() + "\n…（内容过长已截断）"
 
+        modules: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {"type": "plain-text", "content": title},
+            },
+            {
+                "type": "section",
+                "text": {"type": "kmarkdown", "content": content},
+            },
+        ]
+
+        if buttons:
+            modules.append({"type": "divider"})
+            for button in buttons:
+                url = str(button.get("url") or "")
+                text = clean_text(button.get("text"), 30)
+                if not url.startswith(("http://", "https://")):
+                    continue
+                modules.append(
+                    {
+                        "type": "action-group",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "theme": theme,
+                                "value": url,
+                                "click": "link",
+                                "text": {"type": "plain-text", "content": text},
+                            }
+                        ],
+                    }
+                )
+
+        card = {
+            "type": "card",
+            "theme": theme,
+            "color": color_hex,
+            "size": "lg",
+            "modules": modules,
+        }
+        content_json = json.dumps([card], ensure_ascii=False)
+
         if self.dry_run:
-            LOG.info("[DRY-RUN] 将发送到频道 %s:\n%s", channel_id, content)
+            LOG.info(
+                "[DRY-RUN] 卡片发送到频道 %s（color=%s, theme=%s）:\n%s",
+                channel_id,
+                color_hex,
+                theme,
+                json.dumps([card], ensure_ascii=False, indent=2),
+            )
             return
 
         payload: dict[str, Any] = {
             "target_id": channel_id,
-            "type": 9,
-            "content": content,
+            "type": 10,
+            "content": content_json,
         }
         if quote:
             payload["quote"] = quote
@@ -452,7 +558,7 @@ class KookClient:
             code = result.get("code") if isinstance(result, dict) else "?"
             message = result.get("message") if isinstance(result, dict) else result
             raise RuntimeError(f"KOOK API 返回错误: code={code}, message={message}")
-        LOG.info("已推送消息到 KOOK 频道 %s", channel_id)
+        LOG.info("已发送卡片消息到 KOOK 频道 %s（color=%s, theme=%s）", channel_id, color_hex, theme)
 
 
 # ---------------------------------------------------------------------------
@@ -582,48 +688,102 @@ def events_label(events: Any) -> str:
     return "、".join(labels) if labels else "未知"
 
 
-def format_release(repo: str, release: dict[str, Any]) -> str:
-    tag = release.get("tag_name") or release.get("name") or "新版本"
-    title = clean_text(release.get("name"), 80)
+def clean_block(text: Any, limit: int = 400) -> str:
+    """清理多行文本，保留换行，防止破坏卡片 KMarkdown。"""
+    text = str(text or "").replace("`", "'").strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text or "（无描述）"
+
+
+def format_time(value: Any) -> str:
+    if not value:
+        return "未知"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.astimezone().strftime("%Y/%m/%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def build_release_card(
+    repo: str, release: dict[str, Any]
+) -> tuple[str, list[str], list[dict[str, str]]]:
+    tag = clean_text(release.get("tag_name") or release.get("name") or "新版本", 60)
+    author = clean_text((release.get("author") or {}).get("login") or "未知", 40)
     url = release.get("html_url") or f"https://github.com/{repo}/releases"
-    body = str(release.get("body") or "").replace("```", "'''").strip()
-    if len(body) > 400:
-        body = body[:400].rstrip() + "…"
+    body = clean_block(release.get("body"), 400)
+    published = format_time(release.get("published_at"))
 
-    lines = [f"**{repo}** 发布了新版本", f"**[{tag}]({url})**"]
-    if title and title != tag:
-        lines[-1] += f" · {title}"
-    if body:
-        lines.append("")
-        lines.append("```")
-        lines.append(body)
-        lines.append("```")
-    return "\n".join(lines)
+    title = f"🎉 {repo} 发布了新版本！"
+    lines = [
+        f"**发布用户：** {author}",
+        f"**仓库：** [{repo}](https://github.com/{repo})",
+        f"**版本：** `{tag}`",
+        "",
+        "**描述：**",
+        body,
+        "",
+        f"**链接：** {url}",
+        f"**发布时间：** {published}",
+    ]
+    buttons = [
+        {"text": "点击查看GitHub项目仓库", "url": f"https://github.com/{repo}"},
+        {"text": "点击查看Release详细内容", "url": url},
+    ]
+    return title, lines, buttons
 
 
-def format_push(
+def build_commit_card(
     repo: str,
     branch: str,
-    commits: list[dict[str, Any]],
+    commit: dict[str, Any],
     total: int,
     compare_url: str | None,
     rewritten: bool = False,
-) -> str:
-    lines = [f"**{repo}** · `{branch}` 有 **{total}** 个新提交"]
+) -> tuple[str, list[str], list[dict[str, str]]]:
+    commit_data = commit.get("commit") or {}
+    author = clean_text(
+        (commit.get("author") or {}).get("login")
+        or (commit_data.get("author") or {}).get("name")
+        or "未知",
+        40,
+    )
+    branch = clean_text(branch, 60)
+    message = clean_block(commit_data.get("message"), 400)
+    url = commit.get("html_url") or compare_url or f"https://github.com/{repo}"
+    committed_at = (
+        (commit_data.get("committer") or {}).get("date")
+        or (commit_data.get("author") or {}).get("date")
+    )
+
+    title = f"🎉 {repo} 有更新内容啦！"
+    lines = [
+        f"**提交用户：** {author}",
+        f"**仓库：** [{repo}](https://github.com/{repo})",
+        f"**仓库分支：** `{branch}`",
+        "",
+        "**描述：**",
+        message,
+    ]
+    if total > 1:
+        lines.extend(["", f"本次共 **{total}** 个新提交。"])
     if rewritten:
-        lines.append("（检测到历史变化，仅显示最新提交）")
-    for commit in commits:
-        sha = str(commit.get("sha") or "")[:7]
-        message = str((commit.get("commit") or {}).get("message") or "").split("\n")[0]
-        author = (
-            (commit.get("author") or {}).get("login")
-            or ((commit.get("commit") or {}).get("author") or {}).get("name")
-            or "unknown"
-        )
-        lines.append(f"`{sha}` {clean_text(message, 72)} — {clean_text(author, 40)}")
-    if compare_url:
-        lines.append(f"[查看完整对比]({compare_url})")
-    return "\n".join(lines)
+        lines.extend(["", "（检测到历史变化，仅显示最新提交）"])
+    lines.extend(
+        [
+            "",
+            f"**链接：** {url}",
+            f"**提交时间：** {format_time(committed_at)}",
+        ]
+    )
+
+    buttons = [
+        {"text": "点击查看GitHub项目仓库", "url": f"https://github.com/{repo}"},
+        {"text": "点击查看Commits详细内容", "url": compare_url or url},
+    ]
+    return title, lines, buttons
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +821,8 @@ def check_releases(
 
     if last_id is None:
         if cfg.notify_on_first_run:
-            kook.send(cfg.kook_channel_id, format_release(repo.name, valid[0]))
+            title, lines, buttons = build_release_card(repo.name, valid[0])
+            kook.send_card(cfg.kook_channel_id, title, lines, buttons)
         with state.lock:
             repo_state["last_release_id"] = latest_id
         if not cfg.notify_on_first_run:
@@ -674,7 +835,8 @@ def check_releases(
 
     new_releases.sort(key=lambda item: int(item.get("id") or 0))
     for release in new_releases[-3:]:
-        kook.send(cfg.kook_channel_id, format_release(repo.name, release))
+        title, lines, buttons = build_release_card(repo.name, release)
+        kook.send_card(cfg.kook_channel_id, title, lines, buttons)
         time.sleep(1)
     if len(new_releases) > 3:
         LOG.warning(
@@ -711,10 +873,10 @@ def check_commits(
 
     if last_sha is None:
         if cfg.notify_on_first_run:
-            kook.send(
-                cfg.kook_channel_id,
-                format_push(repo.name, branch, commits[: cfg.max_commits], 1, None),
+            title, lines, buttons = build_commit_card(
+                repo.name, branch, commits[0], 1, None
             )
+            kook.send_card(cfg.kook_channel_id, title, lines, buttons)
         with state.lock:
             repo_state.setdefault("last_commit_sha", {})[branch] = latest_sha
         if not cfg.notify_on_first_run:
@@ -739,17 +901,16 @@ def check_commits(
         rewritten = False
 
     compare_url = f"https://github.com/{repo.name}/compare/{last_sha}...{latest_sha}"
-    kook.send(
-        cfg.kook_channel_id,
-        format_push(
-            repo.name,
-            branch,
-            new_commits[: cfg.max_commits],
-            total,
-            compare_url,
-            rewritten,
-        ),
+    latest_commit = new_commits[0] if new_commits else commits[0]
+    title, lines, buttons = build_commit_card(
+        repo.name,
+        branch,
+        latest_commit,
+        total,
+        compare_url,
+        rewritten,
     )
+    kook.send_card(cfg.kook_channel_id, title, lines, buttons)
     with state.lock:
         repo_state.setdefault("last_commit_sha", {})[branch] = latest_sha
 
@@ -828,10 +989,17 @@ def all_repos(cfg: Config, state: StateStore) -> list[RepoConfig]:
 # ---------------------------------------------------------------------------
 
 
-def reply(kook: KookClient, channel_id: str, content: str, quote: Any = None) -> None:
+def reply_card(
+    kook: KookClient,
+    channel_id: str,
+    title: str,
+    lines: list[str],
+    buttons: list[dict[str, str]] | None = None,
+    quote: Any = None,
+) -> None:
     try:
         quote_id = str(quote) if quote else None
-        kook.send(channel_id, content, quote=quote_id)
+        kook.send_card(channel_id, title, lines, buttons=buttons, quote=quote_id)
     except Exception:
         LOG.exception("发送命令回复失败")
 
@@ -865,27 +1033,55 @@ def cmd_add(
         info = github.repo_info(repo)
     except HttpError as exc:
         if exc.status == 404:
-            reply(
+            reply_card(
                 kook,
                 channel_id,
-                "仓库不存在，或这是私有仓库（需要配置有权限的 GITHUB_TOKEN）。",
-                msg_id,
+                "⚠️ 添加失败",
+                [
+                    f"**仓库：** {repo}",
+                    "仓库不存在，或这是私有仓库（需要配置有权限的 `GITHUB_TOKEN`）。",
+                ],
+                quote=msg_id,
             )
         else:
-            reply(kook, channel_id, f"查询 GitHub 仓库失败（HTTP {exc.status}），请稍后再试。", msg_id)
+            reply_card(
+                kook,
+                channel_id,
+                "⚠️ 添加失败",
+                [
+                    f"**仓库：** {repo}",
+                    f"查询 GitHub 仓库失败（HTTP {exc.status}），请稍后再试。",
+                ],
+                quote=msg_id,
+            )
         return
     except Exception:
         LOG.exception("查询仓库失败: %s", repo)
-        reply(kook, channel_id, "查询 GitHub 仓库失败，请稍后再试。", msg_id)
+        reply_card(
+            kook,
+            channel_id,
+            "⚠️ 添加失败",
+            [f"**仓库：** {repo}", "查询 GitHub 仓库失败，请稍后再试。"],
+            quote=msg_id,
+        )
         return
 
     full_name = str(info.get("full_name") or repo)
+    repo_button = {
+        "text": "点击查看GitHub项目仓库",
+        "url": f"https://github.com/{full_name}",
+    }
     if any(item.name.lower() == full_name.lower() for item in cfg.repos):
-        reply(
+        reply_card(
             kook,
             channel_id,
-            f"**{full_name}** 已在 config.toml 中监控，无需重复添加。",
-            msg_id,
+            "ℹ️ 已在监控中",
+            [
+                f"**仓库：** [{full_name}](https://github.com/{full_name})",
+                "该项目已在 `config.toml` 中监控，无需重复添加。",
+            ],
+            buttons=[repo_button],
+            quote=msg_id,
         )
         return
 
@@ -894,16 +1090,30 @@ def cmd_add(
     events = list(cfg.command.default_events)
 
     if not state.add_subscription(full_name, events, None, author_id, author_name):
-        reply(kook, channel_id, f"**{full_name}** 已经订阅过了。", msg_id)
+        reply_card(
+            kook,
+            channel_id,
+            "ℹ️ 已在监控中",
+            [
+                f"**仓库：** [{full_name}](https://github.com/{full_name})",
+                "该项目已经订阅过了。",
+            ],
+            buttons=[repo_button],
+            quote=msg_id,
+        )
         return
 
-    reply(
+    reply_card(
         kook,
         channel_id,
-        f"已添加订阅：**{full_name}**\n"
-        f"推送内容：{events_label(events)}\n"
-        f"更新将推送到指定频道（{cfg.kook_channel_id}）。",
-        msg_id,
+        "✅ 已添加订阅",
+        [
+            f"**仓库：** [{full_name}](https://github.com/{full_name})",
+            f"**推送内容：** {events_label(events)}",
+            f"**通知频道：** `{cfg.kook_channel_id}`",
+        ],
+        buttons=[repo_button],
+        quote=msg_id,
     )
     LOG.info("用户 %s(%s) 添加了订阅: %s", author_name, author_id, full_name)
 
@@ -926,18 +1136,37 @@ def cmd_remove(
     msg_id: Any,
 ) -> None:
     if any(item.name.lower() == repo.lower() for item in cfg.repos):
-        reply(
+        reply_card(
             kook,
             channel_id,
-            f"**{repo}** 由 config.toml 管理，请修改配置文件并重启容器。",
-            msg_id,
+            "⚠️ 无法通过命令删除",
+            [
+                f"**仓库：** {repo}",
+                "该项目由 `config.toml` 管理，请修改配置文件并重启容器。",
+            ],
+            quote=msg_id,
         )
         return
     if state.remove_subscription(repo):
-        reply(kook, channel_id, f"已取消订阅：**{repo}**", msg_id)
+        reply_card(
+            kook,
+            channel_id,
+            "🗑️ 已取消订阅",
+            [f"**仓库：** {repo}"],
+            quote=msg_id,
+        )
         LOG.info("取消订阅: %s", repo)
     else:
-        reply(kook, channel_id, f"没有找到该订阅：{repo}", msg_id)
+        reply_card(
+            kook,
+            channel_id,
+            "❓ 没有找到该订阅",
+            [
+                f"**仓库：** {repo}",
+                "请确认地址是否正确，可以用 `@机器人 列表` 查看当前项目。",
+            ],
+            quote=msg_id,
+        )
 
 
 def cmd_list(
@@ -947,17 +1176,17 @@ def cmd_list(
     channel_id: str,
     msg_id: Any,
 ) -> None:
-    lines = ["**当前监控的项目**"]
+    lines: list[str] = []
     if cfg.repos:
-        lines.append("")
-        lines.append("配置文件：")
+        lines.append("**配置文件：**")
         for item in cfg.repos:
             lines.append(f"- {item.name}（{events_label(item.events)}）")
 
     subscriptions = state.subscriptions()
     if subscriptions:
-        lines.append("")
-        lines.append("频道添加：")
+        if lines:
+            lines.append("")
+        lines.append("**频道添加：**")
         for sub in subscriptions[:20]:
             name = sub.get("repo") or "?"
             by = sub.get("added_by_name") or sub.get("added_by") or ""
@@ -966,10 +1195,9 @@ def cmd_list(
         if len(subscriptions) > 20:
             lines.append(f"- …另有 {len(subscriptions) - 20} 个")
 
-    if len(lines) == 1:
-        lines.append("")
+    if not lines:
         lines.append("暂无监控项目。")
-    reply(kook, channel_id, "\n".join(lines), msg_id)
+    reply_card(kook, channel_id, "📋 当前监控的项目", lines, quote=msg_id)
 
 
 def handle_message_event(
@@ -1016,11 +1244,15 @@ def handle_message_event(
             sorted(roles),
             content[:200],
         )
-        reply(
+        reply_card(
             kook,
             target_id,
-            "你没有权限执行该操作。",
-            event.get("msg_id"),
+            "⛔ 没有权限",
+            [
+                "只有指定身份组的用户才能执行该操作。",
+                "如需权限，请联系管理员。",
+            ],
+            quote=event.get("msg_id"),
         )
         return
 
@@ -1047,14 +1279,16 @@ def handle_message_event(
     elif wants_list:
         cmd_list(cfg, state, kook, target_id, event.get("msg_id"))
     else:
-        reply(
+        reply_card(
             kook,
             target_id,
-            "用法：\n"
-            "@机器人 https://github.com/owner/repo  —— 添加订阅\n"
-            "@机器人 删除 https://github.com/owner/repo  —— 取消订阅\n"
-            "@机器人 列表  —— 查看当前监控项目",
-            event.get("msg_id"),
+            "📖 命令用法",
+            [
+                "**添加订阅：** `@机器人 https://github.com/owner/repo`",
+                "**取消订阅：** `@机器人 删除 https://github.com/owner/repo`",
+                "**查看列表：** `@机器人 列表`",
+            ],
+            quote=event.get("msg_id"),
         )
 
 

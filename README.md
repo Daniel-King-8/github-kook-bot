@@ -5,6 +5,7 @@
 - **轮询模式**：不需要公网 IP / 域名，不需要给仓库配 Webhook，可以监控任意公开仓库
 - **频道命令**：`@机器人 https://github.com/owner/repo` 即可订阅
 - **权限控制**：按 KOOK 身份组 / 用户 ID 白名单限制操作人
+- **随机颜色卡片**：所有推送和命令回复都是 KOOK 卡片消息（type=10），每条随机选一个边框色
 - **不刷屏**：首次运行只建立基线；每次最多推送 3 个 Release、5 条提交
 - **状态持久化**：`data/state.json` 保存检查位置和动态订阅，容器重启不丢失
 - 唯一第三方依赖是 `websockets`（用于接收频道消息），其余全部使用 Python 标准库
@@ -132,7 +133,8 @@ events = ["release"]
 
 说明：
 
-- 只有 `allowed_roles` / `allowed_users` 里的用户能操作，其他人会收到“你没有权限执行该操作”。
+- 所有命令回复也是卡片消息。
+- 只有 `allowed_roles` / `allowed_users` 里的用户能操作，其他人会收到「⛔ 没有权限」卡片。
 - 通过命令添加的订阅保存在 `data/state.json`，重启容器不会丢。
 - 添加后会在后台立即建立基线，并开始按轮询间隔监控。
 - 推送统一发到 `kook.channel_id` 指定的频道。
@@ -182,31 +184,52 @@ python main.py
 
 > Windows 下如果日志中文乱码，先执行 `set PYTHONUTF8=1`（cmd）或 `export PYTHONUTF8=1`（Git Bash）。
 
-## 七、推送效果
+## 七、消息效果
 
-Release：
+所有机器人消息都是卡片（CardMessage `type=10`），每条随机选一个边框色。
 
-```
-microsoft/vscode 发布了新版本
-[v1.96.0](https://github.com/microsoft/vscode/releases/tag/1.96.0) · November 2024
-（Release 更新说明，最多 400 字）
-```
+**Release 卡片**
 
-提交：
+- 标题：`🎉 owner/repo 发布了新版本！`
+- 发布用户、仓库、版本
+- 描述：Release 说明前 400 字
+- 链接、发布时间
+- 按钮：`点击查看GitHub项目仓库` / `点击查看Release详细内容`
 
-```
-koishijs/koishi · `master` 有 3 个新提交
-`a1b2c3d` fix: 修复某个问题 — shigma
-`d4e5f6a` feat: 新增功能 — someone
-[查看完整对比](https://github.com/koishijs/koishi/compare/old...new)
-```
+**提交卡片**
+
+- 标题：`🎉 owner/repo 有更新内容啦！`
+- 提交用户、仓库、仓库分支
+- 描述：最新提交信息，最多 400 字
+- 本次共 N 个新提交
+- 链接、提交时间
+- 按钮：`点击查看GitHub项目仓库` / `点击查看Commits详细内容`
+
+**命令回复卡片**
+
+`@机器人 列表`、`已添加订阅`、`已在监控中`、`已取消订阅`、`没有找到该订阅`、`没有权限`、`命令用法`、`添加失败` 全部以卡片形式回复。
+
+### 随机颜色
+
+24 色随机池，每条消息选 1 个，避免连续重复。卡片边框使用精确色值；KOOK 按钮只支持 6 种主题色，所以按钮使用最接近的主题：
+
+| 按钮主题 | 按钮实际颜色 | 边框色 |
+|---|---|---|
+| `danger` | 红 | `#E74C3C` `#FF6B6B` `#FF4D4F` `#E64980` |
+| `warning` | 橙 | `#F39C12` `#FFA94D` `#FF922B` `#FFD43B` |
+| `success` | 薄荷绿 | `#2ECC71` `#51CF66` `#38D9A9` `#1ABC9C` |
+| `primary` | 草绿 | `#7ACC35` `#6CBF00` `#A9E34B` `#82C91E` |
+| `info` | 天蓝 | `#3498DB` `#4DABF7` `#5C7CFA` `#9775FA` |
+| `secondary` | 灰 | `#95A5A6` `#ADB5BD` `#CED4DA` `#607D8B` |
+
+> 紫色边框会配天蓝色按钮，属于 KOOK 按钮主题的限制，不是 bug。
 
 ## 八、常见问题
 
 **Q：启动后没有收到消息？**
 
 - 首次运行默认只建立基线（`notify_on_first_run = false`），之后有**新**更新才会推送。
-- 检查 `docker compose logs -f` 是否有 `已推送消息` 或 KOOK API 报错。
+- 检查 `docker compose logs -f` 是否有 `已发送卡片消息` 或 KOOK API 报错。
 - 确认机器人在目标服务器里，且对该频道有发送消息权限。
 - 确认 `channel_id` 是频道 ID（纯数字），不是服务器 ID。
 
@@ -221,9 +244,13 @@ koishijs/koishi · `master` 有 3 个新提交
 5. 是否真的 @ 到了机器人（不是只输入了名字）。
 6. 如果 Bot 同时在多个地方运行，同一个 Token 的 WebSocket 会互相挤下线。
 
-**Q：机器人回复“你没有权限执行该操作”？**
+**Q：机器人回复「⛔ 没有权限」？**
 
 查看日志里的 `拒绝无权限命令 ... roles=[...]`，把对应用户的角色 ID 加到 `allowed_roles`，重启容器。
+
+**Q：为什么卡片边框和按钮颜色不完全一样？**
+
+KOOK 卡片的边框支持任意 16 进制色，但按钮只支持 6 种预设主题色。项目会把每个边框色映射到最接近的按钮主题，所以紫色边框会配天蓝色按钮、粉色边框会配红色按钮。
 
 **Q：日志提示 403 / 429？**
 
