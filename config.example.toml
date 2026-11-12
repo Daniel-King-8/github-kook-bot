@@ -65,16 +65,10 @@ channel_ids = []
 
 
 # ============================================================
-# 要监控的仓库，可以写多个 [[repos]]
-# events 支持: "release"（发布版本）、"push"（分支提交）
-# branch 不填则自动使用仓库的默认分支
+# 仓库统一在 KOOK 频道里通过 @机器人 添加/删除
+# 例如：@机器人 https://github.com/owner/repo
+# 不需要在这里配置 [[repos]]
+#
+# 从旧版本升级：config.toml 里已有的 [[repos]] 会在首次启动时
+# 自动迁移为频道订阅，迁移后可以删除这些配置块。
 # ============================================================
-
-[[repos]]
-name = "microsoft/vscode"
-events = ["release", "push"]
-# branch = "main"
-
-[[repos]]
-name = "koishijs/koishi"
-events = ["release"]

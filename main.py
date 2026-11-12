@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-__version__ = "1.2.0"
+__version__ = "1.3.1"
 
 GITHUB_API = "https://api.github.com"
 KOOK_API_DEFAULT = "https://www.kookapp.cn/api/v3"
@@ -41,6 +41,14 @@ GITHUB_URL_RE = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/"
     r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})?)/([A-Za-z0-9_.-]{1,100})",
     re.IGNORECASE,
+)
+# 删除命令允许直接写 owner/repo，不要求完整 URL。
+# GitHub 用户名只能包含字母、数字和连字符，因此不会误匹配域名。
+BARE_REPO_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})?)/"
+    r"([A-Za-z0-9_.-]{1,100})/?"
+    r"(?![A-Za-z0-9_./-])"
 )
 RESERVED_OWNERS = {
     "about", "collections", "customer-stories", "dashboard", "enterprise",
@@ -218,8 +226,8 @@ def load_config(args: argparse.Namespace) -> Config:
     logging.getLogger().setLevel(getattr(logging, level_name, logging.INFO))
 
     repos_raw = raw.get("repos", [])
-    if not isinstance(repos_raw, list) or not repos_raw:
-        raise ValueError("config.toml 中至少需要配置一个 [[repos]]")
+    if not isinstance(repos_raw, list):
+        raise ValueError("config.toml 中的 [[repos]] 配置格式不正确")
 
     repos: list[RepoConfig] = []
     seen: set[str] = set()
@@ -963,8 +971,46 @@ def process_repo_guarded(
             _CHECKING.discard(key)
 
 
-def all_repos(cfg: Config, state: StateStore) -> list[RepoConfig]:
-    merged: dict[str, RepoConfig] = {item.name.lower(): item for item in cfg.repos}
+def migrate_config_repos(cfg: Config, state: StateStore) -> None:
+    """把旧版 config.toml 里的 [[repos]] 一次性迁移为频道订阅。"""
+    with state.lock:
+        if state.data.get("config_repos_migrated"):
+            return
+        subscriptions = state.data.setdefault("subscriptions", [])
+        existing = {
+            str(item.get("repo", "")).lower()
+            for item in subscriptions
+            if isinstance(item, dict)
+        }
+        added = 0
+        for repo in cfg.repos:
+            if repo.name.lower() in existing:
+                continue
+            subscriptions.append(
+                {
+                    "repo": repo.name,
+                    "events": list(repo.events),
+                    "branch": repo.branch,
+                    "added_by": "config",
+                    "added_by_name": "config.toml",
+                    "added_at": utc_now(),
+                }
+            )
+            existing.add(repo.name.lower())
+            added += 1
+        state.data["config_repos_migrated"] = True
+        state.save()
+
+    if cfg.repos:
+        LOG.info(
+            "已将 config.toml 中的 %d 个仓库迁移为频道订阅，之后可以删除 [[repos]] 配置",
+            added,
+        )
+
+
+def all_repos(_cfg: Config, state: StateStore) -> list[RepoConfig]:
+    """所有仓库统一来自频道订阅（含从 config.toml 迁移过来的）。"""
+    merged: dict[str, RepoConfig] = {}
     for sub in state.subscriptions():
         name = str(sub.get("repo") or "").strip()
         if "/" not in name:
@@ -972,7 +1018,7 @@ def all_repos(cfg: Config, state: StateStore) -> list[RepoConfig]:
         key = name.lower()
         if key in merged:
             continue
-        events = sub.get("events") or list(cfg.command.default_events)
+        events = sub.get("events") or ["release", "push"]
         if isinstance(events, str):
             events = [events]
         branch = sub.get("branch") or None
@@ -1011,6 +1057,20 @@ def extract_repo(text: str) -> str | None:
     owner, name = match.group(1), match.group(2)
     if owner.lower() in RESERVED_OWNERS:
         return None
+    if name.lower().endswith(".git"):
+        name = name[:-4]
+    name = name.strip(".")
+    if not owner or not name:
+        return None
+    return f"{owner}/{name}"
+
+
+def extract_bare_repo(text: str) -> str | None:
+    """从 `删除 owner/repo` 这种写法里提取仓库名。"""
+    match = BARE_REPO_RE.search(text)
+    if not match:
+        return None
+    owner, name = match.group(1), match.group(2)
     if name.lower().endswith(".git"):
         name = name[:-4]
     name = name.strip(".")
@@ -1071,19 +1131,6 @@ def cmd_add(
         "text": "点击查看GitHub项目仓库",
         "url": f"https://github.com/{full_name}",
     }
-    if any(item.name.lower() == full_name.lower() for item in cfg.repos):
-        reply_card(
-            kook,
-            channel_id,
-            "ℹ️ 已在监控中",
-            [
-                f"**仓库：** [{full_name}](https://github.com/{full_name})",
-                "该项目已在 `config.toml` 中监控，无需重复添加。",
-            ],
-            buttons=[repo_button],
-            quote=msg_id,
-        )
-        return
 
     author_id = str(author.get("id") or "")
     author_name = str(author.get("username") or author_id)
@@ -1135,18 +1182,6 @@ def cmd_remove(
     repo: str,
     msg_id: Any,
 ) -> None:
-    if any(item.name.lower() == repo.lower() for item in cfg.repos):
-        reply_card(
-            kook,
-            channel_id,
-            "⚠️ 无法通过命令删除",
-            [
-                f"**仓库：** {repo}",
-                "该项目由 `config.toml` 管理，请修改配置文件并重启容器。",
-            ],
-            quote=msg_id,
-        )
-        return
     if state.remove_subscription(repo):
         reply_card(
             kook,
@@ -1176,27 +1211,16 @@ def cmd_list(
     channel_id: str,
     msg_id: Any,
 ) -> None:
-    lines: list[str] = []
-    if cfg.repos:
-        lines.append("**配置文件：**")
-        for item in cfg.repos:
-            lines.append(f"- {item.name}（{events_label(item.events)}）")
-
     subscriptions = state.subscriptions()
-    if subscriptions:
-        if lines:
-            lines.append("")
-        lines.append("**频道添加：**")
-        for sub in subscriptions[:20]:
-            name = sub.get("repo") or "?"
-            by = sub.get("added_by_name") or sub.get("added_by") or ""
-            suffix = f" — {by}" if by else ""
-            lines.append(f"- {name}（{events_label(sub.get('events'))}）{suffix}")
-        if len(subscriptions) > 20:
-            lines.append(f"- …另有 {len(subscriptions) - 20} 个")
-
+    lines = [
+        f"- {sub.get('repo') or '?'}（{events_label(sub.get('events'))}）"
+        for sub in subscriptions[:20]
+    ]
+    if len(subscriptions) > 20:
+        lines.append(f"- …另有 {len(subscriptions) - 20} 个")
     if not lines:
         lines.append("暂无监控项目。")
+        lines.append("使用 `@机器人 https://github.com/owner/repo` 添加。")
     reply_card(kook, channel_id, "📋 当前监控的项目", lines, quote=msg_id)
 
 
@@ -1262,6 +1286,8 @@ def handle_message_event(
     repo = extract_repo(text)
     wants_remove = any(keyword in lower for keyword in REMOVE_KEYWORDS)
     wants_list = any(keyword in lower for keyword in LIST_KEYWORDS)
+    if not repo and wants_remove:
+        repo = extract_bare_repo(text)
 
     if repo and wants_remove:
         cmd_remove(cfg, state, kook, target_id, repo, event.get("msg_id"))
@@ -1285,7 +1311,7 @@ def handle_message_event(
             "📖 命令用法",
             [
                 "**添加订阅：** `@机器人 https://github.com/owner/repo`",
-                "**取消订阅：** `@机器人 删除 https://github.com/owner/repo`",
+                "**取消订阅：** `@机器人 删除 owner/repo`（也支持完整地址）",
                 "**查看列表：** `@机器人 列表`",
             ],
             quote=event.get("msg_id"),
@@ -1485,11 +1511,12 @@ def run(cfg: Config, once: bool = False) -> int:
     github = GitHubClient(cfg.github_token)
     kook = KookClient(cfg.kook_token, cfg.kook_api, cfg.dry_run)
     state = StateStore(cfg.state_path)
+    migrate_config_repos(cfg, state)
 
     LOG.info("启动 GitHub -> KOOK 推送机器人 v%s", __version__)
     LOG.info(
         "监控 %d 个仓库 | 轮询间隔 %d 秒 | 状态文件 %s",
-        len(cfg.repos),
+        len(all_repos(cfg, state)),
         cfg.interval,
         cfg.state_path,
     )

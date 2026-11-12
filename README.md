@@ -94,22 +94,15 @@ allowed_users = []               # 可选：额外允许的用户 ID
 default_events = ["release", "push"]
 channel_ids = []                 # 留空 = 只允许上面的 kook.channel_id
 
-[[repos]]
-name = "microsoft/vscode"
-events = ["release", "push"]
-# branch = "main"           # 不填则自动使用仓库默认分支
-
-[[repos]]
-name = "koishijs/koishi"
-events = ["release"]
+# 仓库全部通过频道命令 @机器人 添加/删除，不需要在这里写 [[repos]]
 ```
 
-`events` 支持：
+通过频道添加的仓库，默认监控 `default_events` 里的事件：
 
 | 值 | 说明 |
 |---|---|
 | `release` | 新版本发布（GitHub Releases） |
-| `push` | 分支有新提交（默认分支或 `branch` 指定的分支） |
+| `push` | 分支有新提交（默认分支） |
 
 `[command]` 配置项：
 
@@ -127,7 +120,7 @@ events = ["release"]
 
 ```
 @机器人 https://github.com/owner/repo           添加订阅（默认 Release + 提交）
-@机器人 删除 https://github.com/owner/repo      取消订阅
+@机器人 删除 owner/repo                          取消订阅（也支持完整地址）
 @机器人 列表                                    查看当前监控的所有项目
 ```
 
@@ -135,11 +128,13 @@ events = ["release"]
 
 - 所有命令回复也是卡片消息。
 - 只有 `allowed_roles` / `allowed_users` 里的用户能操作，其他人会收到「⛔ 没有权限」卡片。
-- 通过命令添加的订阅保存在 `data/state.json`，重启容器不会丢。
+- 所有仓库统一保存在 `data/state.json`，重启容器不会丢。
 - 添加后会在后台立即建立基线，并开始按轮询间隔监控。
 - 推送统一发到 `kook.channel_id` 指定的频道。
-- 在 `config.toml` 里定义的仓库不能用命令删除，只能改配置文件。
-- 删除 `data/state.json` 会同时清空所有动态订阅。
+- `@机器人 列表` 只显示仓库名和监控事件，不显示添加人。
+- **所有仓库都可以用 `@机器人 删除 <地址>` 删除**，不再区分配置文件。
+- 删除 `data/state.json` 会清空所有订阅。
+- 从旧版本升级：`config.toml` 里已有的 `[[repos]]` 会在首次启动时自动迁移为频道订阅，之后可以删除这些配置块。
 
 ## 五、Docker 部署
 
@@ -274,7 +269,7 @@ GitHub API 限流。配置 `GITHUB_TOKEN`，或增大 `interval`。
 
 **Q：如何监控更多仓库？**
 
-可以继续在 `config.toml` 追加 `[[repos]]` 并重启；也可以直接在频道里 @机器人 添加。
+直接在频道里 `@机器人 https://github.com/owner/repo` 添加，不需要改配置文件，也不用重启。
 
 **Q：会重复推送吗？**
 
